@@ -69,6 +69,60 @@ npm run dev
 | 保留管理 | `retention` | 保留策略 | 策略编号、目标表、保留天数 |
 | 表格式 | `table_format` | 表格式配置 | 配置编号、目标表、表格式类型 |
 
+## 快照交接包与回填窗口
+
+快照管理页内置“快照交接包”面板；后端核心实现在
+`backend/app/handoff.py`，HTTP 接口前缀为 `/api/snapshot-handoff`。
+
+交接包是自描述 JSON，包含：
+
+- 源表名称、快照编号、快照版本和业务键；
+- 每个分段的段号、行数、SHA-256/MD5 内容凭证；
+- 完整业务行和整包内容凭证，可在另一环境直接导入；
+- 导入后同步到 `store.handoff.list_baselines()` 和
+  `store._backfill_baseline_manifest`。
+
+核心接口：
+
+```text
+POST /api/snapshot-handoff/packages/export       # 生成完整交接包
+POST /api/snapshot-handoff/packages/verify       # 核对源表/版本/分段/凭证
+POST /api/snapshot-handoff/imports               # 创建分段导入候选
+POST /api/snapshot-handoff/imports/{id}/segments/{n}
+POST /api/snapshot-handoff/imports/{id}/interrupt
+POST /api/snapshot-handoff/imports/{id}/resume
+POST /api/snapshot-handoff/imports/{id}/complete
+POST /api/snapshot-handoff/packages/import       # 一次性完整导入
+GET  /api/snapshot-handoff/baselines             # 回填基准清单
+POST /api/snapshot-handoff/backfill-windows      # 从已核验基准实际回填
+POST /api/snapshot-handoff/backfill-windows/compare
+GET  /api/snapshot-handoff/conflicts
+POST /api/snapshot-handoff/candidates/{id}/register-alternative
+```
+
+登记规则：
+
+1. 相同编号、快照版本和内容凭证的重复导入只返回 `duplicate/idempotent`
+   确认，不新增基准。
+2. 相同编号和版本但内容凭证变化时，新候选进入 `quarantined` 隔离区，
+   原回填基准不变；可使用新编号或新版本另行登记。
+3. 同一编号已有首段核验通过的候选时，后到的不同内容完整包会得到并发冲突提示。
+   默认 `registered_version_wins` 保留首个完整核验并登记者，同时在回填窗口中明示
+   未完候选仍待哪一段；若要让首段候选悲观占用编号，可使用
+   `SnapshotHandoffRegistry(conflict_policy="first_verified_segment_wins")`。
+   冲突响应始终给出 `actual_retained_candidate`、`loser_candidate` 和败方下一步。
+4. 回填窗口只接受 `complete_verified` 基准。若该编号只有未完候选，
+   窗口返回 `blocked_incomplete` 和 `missing_segment_nos`，明确仍待哪一段。
+5. 窗口结果包含每个业务键的期望行、实际行、状态和字段差异；两个窗口可通过
+   `compare_backfill_windows` 比较。
+
+验收测试：
+
+```bash
+cd backend
+.venv/bin/pytest -q tests/test_snapshot_handoff.py
+```
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。

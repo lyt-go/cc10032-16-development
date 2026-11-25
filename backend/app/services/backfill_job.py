@@ -70,16 +70,32 @@ class BackfillJobService(BaseModuleService):
         if parallelism > 10:
             return {"ok": False, "reason": f"并行度 {parallelism} 超限（最大10）"}
 
-        # 模拟回填数据
+        # 模拟回填数据；若存在完整已核验交接基准，则改为回填快照实际业务行。
         rows_to_insert = []
-        for i in range(20):
-            rows_to_insert.append({
-                "table": target_table,
-                "batch": entry.get("任务编号"),
-                "row": i,
-                "ts": time.time() - i * 3600,  # 历史时间
-                "backfilled": True,
-            })
+        handoff_window: dict[str, Any] | None = None
+        baseline = next(
+            (item for item in store.handoff.list_baselines()
+             if item.get("source_table") in {table.strip() for table in source_tables if table.strip()}),
+            None,
+        )
+        if baseline is not None:
+            handoff_window = store.handoff.open_backfill_window(
+                baseline["package_no"], target_table=target_table)
+            if not handoff_window.get("ok"):
+                entry["依赖检查"] = "失败: " + handoff_window.get("message", "交接基准不可用")
+                entry["status"] = "已失败"
+                entry["abnormal"] = True
+                return {"ok": False, "reason": handoff_window.get("message"), "window": handoff_window}
+            rows_to_insert = handoff_window.get("backfilled_rows", [])
+        else:
+            for i in range(20):
+                rows_to_insert.append({
+                    "table": target_table,
+                    "batch": entry.get("任务编号"),
+                    "row": i,
+                    "ts": time.time() - i * 3600,  # 历史时间
+                    "backfilled": True,
+                })
 
         entry["依赖检查"] = "通过"
         entry["回填水位"] = str(time.time())
@@ -96,7 +112,33 @@ class BackfillJobService(BaseModuleService):
             "rows_inserted": len(rows_to_insert),
             "source_tables": source_tables,
             "dependencies_passed": len(source_tables),
+            "window_id": handoff_window.get("window_id") if handoff_window else None,
+            "snapshot_id": handoff_window.get("package_no") if handoff_window else None,
+            "all_business_keys_matched": handoff_window.get("all_keys_matched") if handoff_window else None,
+            "key_count": handoff_window.get("key_count") if handoff_window else None,
+            "key_results": handoff_window.get("key_results") if handoff_window else None,
         }
+
+    # ---------- 交接包回填窗口 ----------
+    def open_backfill_window(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return store.handoff.open_backfill_window(*args, **kwargs)
+
+    start_backfill_window = open_backfill_window
+    run_backfill_window = open_backfill_window
+
+    def backfill_from_snapshot(self, snapshot_id: str, **kwargs: Any) -> dict[str, Any]:
+        return store.handoff.open_backfill_window(snapshot_id, **kwargs)
+
+    def backfill_from_registered_snapshot(self, snapshot_id: str, **kwargs: Any) -> dict[str, Any]:
+        return store.handoff.open_backfill_window(snapshot_id, **kwargs)
+
+    def compare_backfill_windows(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return store.handoff.compare_backfill_windows(*args, **kwargs)
+
+    compare_backfill_results = compare_backfill_windows
+
+    def backfill_baseline_manifest(self) -> list[dict[str, Any]]:
+        return store.handoff.list_baselines()
 
     def domain_snapshot(self) -> dict[str, Any]:
         base = super().domain_snapshot()

@@ -8,6 +8,7 @@ import hashlib
 import time
 from typing import Any
 
+from app.handoff import SnapshotHandoffRegistry
 from app.seed import SEED_ROWS
 
 
@@ -129,6 +130,17 @@ class Store:
         self._watermark_offsets: dict[str, dict[str, Any]] = {}
         # 快照存储表（snapshot_mgr → backfill_job 共享）
         self._snapshot_store: dict[str, dict[str, Any]] = {}
+        # 完整交接包、分段导入进度、回填基准清单和冲突隔离区
+        self.handoff = SnapshotHandoffRegistry()
+        self.snapshot_handoff = self.handoff
+        self._handoff_registry = self.handoff
+        self._backfill_baseline_manifest: list[dict[str, Any]] = self.handoff.baselines
+        self._backfill_baselines = self._backfill_baseline_manifest
+        self.backfill_baselines = self._backfill_baseline_manifest
+        self._backfill_windows: dict[str, dict[str, Any]] = self.handoff.windows
+        self._backfilled_tables: dict[str, list[dict[str, Any]]] = self.handoff.backfilled_tables
+        self.backfilled_tables = self._backfilled_tables
+        self.handoff.sync_callback = self._handoff_sync
         # 血缘图（lineage → table_format 共享）
         self._lineage_graph: dict[str, list[dict[str, Any]]] = {}
         # 归档清单（cold_archive → retention 共享）
@@ -216,6 +228,77 @@ class Store:
 
     def get_snapshot(self, snap_id: str) -> dict[str, Any] | None:
         return self._snapshot_store.get(snap_id)
+
+    def get_backfill_baseline_manifest(self) -> list[dict[str, Any]]:
+        return self.handoff.list_baselines()
+
+    def get_backfill_windows(self, package_no: str | None = None) -> list[dict[str, Any]]:
+        if package_no:
+            ids = self.handoff.window_ids_by_no.get(package_no, [])
+            return [self.handoff.windows[window_id] for window_id in ids]
+        return list(self.handoff.windows.values())
+
+    def _handoff_sync(self, event: str, baseline: dict[str, Any], package: dict[str, Any]) -> None:
+        """把已核验交接包同步到旧快照存储和 snapshot_mgr 清单。"""
+        code = baseline["package_no"]
+        self._snapshot_store[code] = {
+            "table": baseline["source_table"],
+            "version": baseline["snapshot_version"],
+            "path": baseline["data_location"],
+            "checksum": baseline["content_credential"],
+            "row_count": baseline["row_count"],
+            "rows": package.get("rows") or [
+                row for segment in package.get("segments", []) for row in segment.get("rows", [])
+            ],
+            "data_sample": [
+                row for segment in package.get("segments", []) for row in segment.get("rows", [])
+            ][:3],
+            "handoff_verified": True,
+            "baseline_id": baseline["baseline_id"],
+        }
+        rows = self.rows("snapshot_mgr")
+        existing = next((row for row in rows if row.get("快照编号") == code), None)
+        values = {
+            "源表名称": baseline["source_table"],
+            "快照版本": baseline["snapshot_version"],
+            "行数统计": str(baseline["row_count"]),
+            "存储路径": baseline["data_location"],
+            "校验摘要": baseline["content_credential"][:16],
+            "status": "已完成",
+            "pending": False,
+            "abnormal": False,
+        }
+        if existing:
+            existing.update(values)
+        else:
+            next_id = max((int(row.get("id", 0)) for row in rows), default=0) + 1
+            rows.append({
+                "id": next_id,
+                "快照编号": code,
+                "快照时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "压缩格式": "json-handoff",
+                **values,
+            })
+
+    def reset_runtime_state(self) -> None:
+        """清空测试/演示产生的运行时状态，保留种子业务清单。"""
+        self._pipelines.clear()
+        self._global_changelog.clear()
+        self._schema_registry.clear()
+        self._watermark_offsets.clear()
+        self._snapshot_store.clear()
+        self._lineage_graph.clear()
+        self._archive_manifest.clear()
+        self.handoff.reset()
+        self.snapshot_handoff = self.handoff
+        self._handoff_registry = self.handoff
+        self._backfill_baseline_manifest = self.handoff.baselines
+        self._backfill_baselines = self._backfill_baseline_manifest
+        self.backfill_baselines = self._backfill_baseline_manifest
+        self._backfill_windows = self.handoff.windows
+        self._backfilled_tables = self.handoff.backfilled_tables
+        self.backfilled_tables = self._backfilled_tables
+        self.handoff.sync_callback = self._handoff_sync
 
     # ---------- 变更日志 ----------
     def append_changelog(self, entry: dict[str, Any]) -> None:

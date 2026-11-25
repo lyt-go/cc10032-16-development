@@ -12,6 +12,7 @@ from app.services.stream_lookup import StreamLookupService
 from app.services.merge_plan import MergePlanService
 from app.services.partition_scale import PartitionScaleService
 from app.services.snapshot_mgr import SnapshotMgrService
+from app.services.snapshot_handoff import SnapshotHandoffService
 from app.services.data_reconcile import DataReconcileService
 from app.services.backfill_job import BackfillJobService
 from app.services.cold_archive import ColdArchiveService
@@ -32,6 +33,7 @@ SERVICES: dict[str, BaseModuleService] = {
     "merge_plan": MergePlanService(),
     "partition_scale": PartitionScaleService(),
     "snapshot_mgr": SnapshotMgrService(),
+    "snapshot_handoff": SnapshotHandoffService(),
     "data_reconcile": DataReconcileService(),
     "backfill_job": BackfillJobService(),
     "cold_archive": ColdArchiveService(),
